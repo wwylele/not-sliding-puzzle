@@ -1,0 +1,39 @@
+[package]
+name = "not-sliding-puzzle"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+winit = "0.29"
+glam = { version = "0.25", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+image = "0.24"
+log = "*"
+rand = "0.8"
+web-time = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = "0.19"
+env_logger = "0.10"
+pollster = "0.3"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "0.19", features = ["webgl", "wgsl"], default-features = false }
+getrandom = { version = "0.2", features = ["js"] }
+console_error_panic_hook = "0.1"
+console_log = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+[lib]
+name = "notslidingpuzzle"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+
+[[bin]]
+name = "not-sliding-puzzle"
+path = "src/main.rs"
+test = false

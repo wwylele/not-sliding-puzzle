@@ -36,17 +36,13 @@ var mask_sampler: sampler;
 var light: texture_2d<f32>;
 
 @vertex
-fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
-    let bx = f32((in_vertex_index % 4) / 2);
-    let by = f32((in_vertex_index % 4) % 2);
-    let x = bx * 2.0 - 1.0;
-    let y = by * 2.0 - 1.0;
-    let xyzw = uni.transform * vec4<f32>(x, y, 0.0, 1.0);
+fn vs_main(@location(0) position: vec2<f32>) -> VertexOutput {
+    let xyzw = vec4<f32>(position, 0.0, 1.0);
     var result: VertexOutput;
-    result.position = uni.transform * vec4<f32>(x, y, 0.0, 1.0);
-    result.tex_coords = (uni.tex_transform * vec4<f32>(x, y, 0.0, 1.0)).xy;
-    result.mask_coords = (uni.mask_transform * vec4<f32>(x, y, 0.0, 1.0)).xy;
-    result.light_coords = (uni.light_transform * vec4<f32>(x, y, 0.0, 1.0)).xy;
+    result.position = uni.transform * xyzw;
+    result.tex_coords = (uni.tex_transform * xyzw).xy;
+    result.mask_coords = (uni.mask_transform * xyzw).xy;
+    result.light_coords = (uni.light_transform * xyzw).xy;
     return result;
 }
 

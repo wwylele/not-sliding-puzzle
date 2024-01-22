@@ -1,9 +1,8 @@
 use bytemuck::*;
 use glam::*;
-use log::*;
 use std::{borrow::Cow, io::Cursor, mem::size_of};
 use web_time::*;
-use wgpu::*;
+use wgpu::{util::*, *};
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
     event::{ElementState, Event, WindowEvent},
@@ -128,6 +127,7 @@ struct Game<'window> {
     pipeline_layout: PipelineLayout,
     config: SurfaceConfiguration,
     uniform_buffer: Buffer,
+    vertex_buffer: Buffer,
 
     render_pipeline: RenderPipeline,
     bind_group_piece: BindGroup,
@@ -261,7 +261,15 @@ impl<'window> Game<'window> {
             vertex: VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[],
+                buffers: &[VertexBufferLayout {
+                    array_stride: 8,
+                    step_mode: VertexStepMode::Vertex,
+                    attributes: &[VertexAttribute {
+                        format: VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
             },
             fragment: Some(FragmentState {
                 module: &shader,
@@ -383,6 +391,13 @@ impl<'window> Game<'window> {
         config.present_mode = PresentMode::Fifo;
         surface.configure(&device, &config);
 
+        let vertex_buffer_content: &[f32] = &[-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0];
+        let vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: None,
+            contents: cast_slice(vertex_buffer_content),
+            usage: BufferUsages::VERTEX,
+        });
+
         // Initialize first game
         let current_rule = Rule::Horsey;
         let current_size = BoardSize::Small;
@@ -407,6 +422,7 @@ impl<'window> Game<'window> {
             pipeline_layout,
             config,
             uniform_buffer,
+            vertex_buffer,
 
             render_pipeline,
             bind_group_piece,
@@ -617,6 +633,8 @@ impl<'window> Game<'window> {
             .expect("Failed to acquire next swap chain texture");
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
 
+        let vertex_buffer_slice = self.vertex_buffer.slice(..);
+
         // Clear background to black
         let mut encoder = self
             .device
@@ -685,6 +703,7 @@ impl<'window> Game<'window> {
                 rpass.set_pipeline(&self.render_pipeline);
 
                 rpass.set_bind_group(0, &self.bind_group_button, &[]);
+                rpass.set_vertex_buffer(0, vertex_buffer_slice);
                 rpass.draw(0..4, 0..1);
             }
             self.queue.submit(Some(encoder.finish()));
@@ -773,6 +792,7 @@ impl<'window> Game<'window> {
                 rpass.set_pipeline(&self.render_pipeline);
 
                 rpass.set_bind_group(0, &self.bind_group_piece, &[]);
+                rpass.set_vertex_buffer(0, vertex_buffer_slice);
                 rpass.draw(0..4, 0..1);
             }
 

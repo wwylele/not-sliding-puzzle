@@ -1,24 +1,35 @@
 use bytemuck::*;
 use glam::*;
-use std::{borrow::Cow, io::Cursor, mem::size_of};
+use log::*;
+use rfd::*;
+use std::{borrow::Cow, future::*, io::Cursor, mem::size_of, pin::*, sync::*, task::*};
 use web_time::*;
 use wgpu::{util::*, *};
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
     event::{ElementState, Event, WindowEvent},
-    event_loop::EventLoop,
+    event_loop::{EventLoop, EventLoopProxy},
     window::Window,
 };
 
 use crate::board::*;
 use crate::res;
 
-fn load_texture(bytes: &[u8], device: &Device, queue: &Queue, srgb: bool) -> Texture {
+pub enum UserEvent {
+    PicturePickerWake,
+}
+
+fn load_texture(
+    bytes: &[u8],
+    device: &Device,
+    queue: &Queue,
+    srgb: bool,
+) -> Option<(Texture, f32 /*w/h*/)> {
     let img = image::io::Reader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .unwrap()
+        .ok()?
         .decode()
-        .unwrap()
+        .ok()?
         .to_rgba8();
 
     let texture_size = Extent3d {
@@ -53,7 +64,7 @@ fn load_texture(bytes: &[u8], device: &Device, queue: &Queue, srgb: bool) -> Tex
         },
         texture_size,
     );
-    texture
+    Some((texture, img.width() as f32 / img.height() as f32))
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -66,7 +77,10 @@ enum ButtonId {
     Full = 4,
 
     Reveal = 5,
+    Picture = 6,
 }
+
+const BUTTON_COUNT: i32 = 7;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum ButtonGroup {
@@ -112,6 +126,24 @@ struct Uniform {
     p2: f32,
 }
 
+struct PicturePickerWaker {
+    // Technically this doesn't need to be a Mutex given this is in a single-threaded program.
+    // But the safe construction of Waker from Wake requires Arc, which requires Sync,
+    // and EventLoopProxy is inconsistently ?Sync across different platforms.
+    // To avoid unsafe, let's just slap a Mutex on this cold path.
+    event_proxy: Mutex<EventLoopProxy<UserEvent>>,
+}
+
+impl Wake for PicturePickerWaker {
+    fn wake(self: Arc<Self>) {
+        let _ = self
+            .event_proxy
+            .lock()
+            .unwrap()
+            .send_event(UserEvent::PicturePickerWake);
+    }
+}
+
 struct Game<'window> {
     window: &'window Window,
     device: Device,
@@ -128,6 +160,11 @@ struct Game<'window> {
     config: SurfaceConfiguration,
     uniform_buffer: Buffer,
     vertex_buffer: Buffer,
+    sampler: Sampler,
+    mask_sampler: Sampler,
+    mask_texture_view: TextureView,
+    light_texture_view: TextureView,
+    bind_group_layout: BindGroupLayout,
 
     render_pipeline: RenderPipeline,
     bind_group_piece: BindGroup,
@@ -143,13 +180,72 @@ struct Game<'window> {
     window_height: u32,
     board_transform: Mat4,
     board_transform_inv: Mat4,
+    picture_transform: Mat4,
 
     prev_time: Instant,
     animating: bool,
+
+    picture_picker_task: Option<Pin<Box<dyn Future<Output = Option<Vec<u8>>>>>>,
+    picture_picker_waker: Arc<PicturePickerWaker>,
+}
+
+fn create_bind_group(
+    device: &Device,
+    bind_group_layout: &BindGroupLayout,
+    uniform_buffer: &Buffer,
+    texture_view: &TextureView,
+    sampler: &Sampler,
+    mask_texture_view: &TextureView,
+    mask_sampler: &Sampler,
+    light_texture_view: &TextureView,
+) -> BindGroup {
+    device.create_bind_group(&BindGroupDescriptor {
+        label: None,
+        layout: bind_group_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: BindingResource::TextureView(texture_view),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: BindingResource::Sampler(sampler),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: BindingResource::TextureView(mask_texture_view),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: BindingResource::Sampler(mask_sampler),
+            },
+            BindGroupEntry {
+                binding: 5,
+                resource: BindingResource::TextureView(light_texture_view),
+            },
+        ],
+    })
+}
+
+fn get_picture_transform(aspect_ratio: f32) -> Mat4 {
+    if aspect_ratio > 1.0 {
+        Mat4::from_translation(vec3((1.0 - 1.0 / aspect_ratio) / 2.0, 0.0, 0.0))
+            * Mat4::from_scale(vec3(1.0 / aspect_ratio, 1.0, 1.0))
+    } else {
+        Mat4::from_translation(vec3(0.0, (1.0 - aspect_ratio) / 2.0, 0.0))
+            * Mat4::from_scale(vec3(1.0, aspect_ratio, 1.0))
+    }
 }
 
 impl<'window> Game<'window> {
-    pub async fn new(window: &'window Window) -> Game<'window> {
+    pub async fn new(
+        window: &'window Window,
+        event_proxy: EventLoopProxy<UserEvent>,
+    ) -> Game<'window> {
         let mut size = window.inner_size();
         size.width = size.width.max(1);
         size.height = size.height.max(1);
@@ -293,22 +389,24 @@ impl<'window> Game<'window> {
         });
 
         // Load textures and samplers
-        let texture = load_texture(res::EXAMPLE_PICTURE, &device, &queue, true);
+        let (texture, aspect_ratio) =
+            load_texture(res::EXAMPLE_PICTURE, &device, &queue, true).unwrap();
         let texture_view = texture.create_view(&TextureViewDescriptor::default());
+        let picture_transform = get_picture_transform(aspect_ratio);
 
-        let mask_texture = load_texture(res::PIECE_MASK_PNG, &device, &queue, false);
+        let (mask_texture, _) = load_texture(res::PIECE_MASK_PNG, &device, &queue, false).unwrap();
         let mask_texture_view = mask_texture.create_view(&TextureViewDescriptor::default());
 
-        let light_texture = load_texture(res::BLOCK_PNG, &device, &queue, true);
+        let (light_texture, _) = load_texture(res::BLOCK_PNG, &device, &queue, true).unwrap();
         let light_texture_view = light_texture.create_view(&TextureViewDescriptor::default());
 
-        let button_texture = load_texture(res::BUTTON_PNG, &device, &queue, true);
+        let (button_texture, _) = load_texture(res::BUTTON_PNG, &device, &queue, true).unwrap();
         let button_texture_view = button_texture.create_view(&TextureViewDescriptor::default());
 
-        let button_mask = load_texture(res::WHITE_PNG, &device, &queue, true);
+        let (button_mask, _) = load_texture(res::WHITE_PNG, &device, &queue, true).unwrap();
         let button_mask_view = button_mask.create_view(&TextureViewDescriptor::default());
 
-        let button_deco = load_texture(res::BUTTON_DECO_PNG, &device, &queue, true);
+        let (button_deco, _) = load_texture(res::BUTTON_DECO_PNG, &device, &queue, true).unwrap();
         let button_deco_view = button_deco.create_view(&TextureViewDescriptor::default());
 
         let sampler = device.create_sampler(&SamplerDescriptor {
@@ -323,66 +421,27 @@ impl<'window> Game<'window> {
         });
 
         // Define bind groups
-        let bind_group_piece = device.create_bind_group(&BindGroupDescriptor {
-            label: None,
-            layout: &bind_group_layout,
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: BindingResource::TextureView(&texture_view),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    resource: BindingResource::Sampler(&sampler),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    resource: BindingResource::TextureView(&mask_texture_view),
-                },
-                BindGroupEntry {
-                    binding: 4,
-                    resource: BindingResource::Sampler(&mask_sampler),
-                },
-                BindGroupEntry {
-                    binding: 5,
-                    resource: BindingResource::TextureView(&light_texture_view),
-                },
-            ],
-        });
-        let bind_group_button = device.create_bind_group(&BindGroupDescriptor {
-            label: None,
-            layout: &bind_group_layout,
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: BindingResource::TextureView(&button_texture_view),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    resource: BindingResource::Sampler(&sampler),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    resource: BindingResource::TextureView(&button_mask_view),
-                },
-                BindGroupEntry {
-                    binding: 4,
-                    resource: BindingResource::Sampler(&mask_sampler),
-                },
-                BindGroupEntry {
-                    binding: 5,
-                    resource: BindingResource::TextureView(&button_deco_view),
-                },
-            ],
-        });
+        let bind_group_piece = create_bind_group(
+            &device,
+            &bind_group_layout,
+            &uniform_buffer,
+            &texture_view,
+            &sampler,
+            &mask_texture_view,
+            &mask_sampler,
+            &light_texture_view,
+        );
+
+        let bind_group_button = create_bind_group(
+            &device,
+            &bind_group_layout,
+            &uniform_buffer,
+            &button_texture_view,
+            &sampler,
+            &button_mask_view,
+            &mask_sampler,
+            &button_deco_view,
+        );
 
         // Initial config. Enable VSync
         let mut config = surface
@@ -410,7 +469,12 @@ impl<'window> Game<'window> {
             Button::new(ButtonId::Horsey, ButtonGroup::Rule),
             Button::new(ButtonId::Full, ButtonGroup::Rule),
             Button::new(ButtonId::Reveal, ButtonGroup::Misc),
+            Button::new(ButtonId::Picture, ButtonGroup::Misc),
         ];
+
+        let event_proxy = Mutex::new(event_proxy);
+        let picture_picker_waker = Arc::new(PicturePickerWaker { event_proxy });
+
         let mut game = Game {
             window,
             device,
@@ -423,6 +487,11 @@ impl<'window> Game<'window> {
             config,
             uniform_buffer,
             vertex_buffer,
+            sampler,
+            mask_sampler,
+            mask_texture_view,
+            light_texture_view,
+            bind_group_layout,
 
             render_pipeline,
             bind_group_piece,
@@ -438,9 +507,13 @@ impl<'window> Game<'window> {
             window_height: 1,
             board_transform: Mat4::IDENTITY,
             board_transform_inv: Mat4::IDENTITY,
+            picture_transform,
 
             prev_time: Instant::now(),
             animating: true,
+
+            picture_picker_task: None,
+            picture_picker_waker,
         };
         game.update_button();
         game
@@ -529,7 +602,71 @@ impl<'window> Game<'window> {
                 ButtonId::Horsey => button.selected = self.current_rule == Rule::Horsey,
                 ButtonId::Full => button.selected = self.current_rule == Rule::Full,
                 ButtonId::Reveal => button.selected = self.board.reveal,
+                _ => (),
             }
+        }
+    }
+
+    fn initiate_picture_change(&mut self) {
+        if self.picture_picker_task.is_some() {
+            warn!("Already picking file");
+            return;
+        }
+        let task = async {
+            let Some(file) = AsyncFileDialog::new()
+                .add_filter("Image", &["bmp", "png", "jpg", "jpeg", "gif"])
+                .set_title("Pick a custom picture")
+                .pick_file()
+                .await
+            else {
+                return None;
+            };
+            Some(file.read().await)
+        };
+        self.picture_picker_task = Some(Box::pin(task) as Pin<Box<_>>);
+        self.poll_picture_change();
+    }
+
+    fn poll_picture_change(&mut self) {
+        let Some(task) = &mut self.picture_picker_task else {
+            warn!("Polling when there is no file picker");
+            return;
+        };
+        match task.as_mut().poll(&mut Context::from_waker(&Waker::from(
+            self.picture_picker_waker.clone(),
+        ))) {
+            Poll::Ready(image_data) => {
+                self.picture_picker_task = None;
+
+                let Some(image_data) = image_data else {
+                    warn!("Failed to pick any file");
+                    return;
+                };
+
+                info!("Received image data");
+
+                let Some((texture, aspect_ratio)) =
+                    load_texture(&image_data, &self.device, &self.queue, true)
+                else {
+                    warn!("Unable to decode image");
+                    return;
+                };
+                let texture_view = texture.create_view(&TextureViewDescriptor::default());
+
+                self.picture_transform = get_picture_transform(aspect_ratio);
+                self.bind_group_piece = create_bind_group(
+                    &self.device,
+                    &self.bind_group_layout,
+                    &self.uniform_buffer,
+                    &texture_view,
+                    &self.sampler,
+                    &self.mask_texture_view,
+                    &self.mask_sampler,
+                    &self.light_texture_view,
+                );
+                self.resume_animation();
+            }
+            Poll::Pending => (),
         }
     }
 
@@ -562,6 +699,9 @@ impl<'window> Game<'window> {
                 }
                 ButtonId::Reveal => {
                     self.board.reveal = !self.board.reveal;
+                }
+                ButtonId::Picture => {
+                    self.initiate_picture_change();
                 }
             }
             self.update_button();
@@ -662,7 +802,7 @@ impl<'window> Game<'window> {
 
         // Draw buttons
         for button in &self.buttons {
-            let tex_transform = Mat4::from_scale(vec3(1.0 / 6.0, 1.0, 1.0))
+            let tex_transform = Mat4::from_scale(vec3(1.0 / BUTTON_COUNT as f32, 1.0, 1.0))
                 * Mat4::from_translation(vec3(button.id as i32 as f32, 0.0, 0.0))
                 * common_tex_transform;
             let button_deco_transform =
@@ -751,7 +891,8 @@ impl<'window> Game<'window> {
                 * Mat4::from_translation(translate.extend(0.0))
                 * shake;
 
-            let tex_transform = common_tex_transform
+            let tex_transform = self.picture_transform
+                * common_tex_transform
                 * grid_scale
                 * Mat4::from_translation(source_translate.extend(0.0));
 
@@ -807,10 +948,14 @@ impl<'window> Game<'window> {
     }
 
     // Run the game
-    pub fn run(&mut self, event_loop: EventLoop<()>) {
+    pub fn run(&mut self, event_loop: EventLoop<UserEvent>) {
         event_loop
             .run(move |event, target| {
-                if let Event::WindowEvent {
+                if let Event::UserEvent(user_event) = event {
+                    match user_event {
+                        UserEvent::PicturePickerWake => self.poll_picture_change(),
+                    }
+                } else if let Event::WindowEvent {
                     window_id: _,
                     event,
                 } = event
@@ -835,7 +980,8 @@ impl<'window> Game<'window> {
     }
 }
 
-pub async fn run(event_loop: EventLoop<()>, window: Window) {
-    let mut game = Game::new(&window).await;
+pub async fn run(event_loop: EventLoop<UserEvent>, window: Window) {
+    let event_proxy = event_loop.create_proxy();
+    let mut game = Game::new(&window, event_proxy).await;
     game.run(event_loop);
 }

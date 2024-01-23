@@ -2,10 +2,10 @@ mod board;
 mod entry;
 mod res;
 
-use winit::{event_loop::EventLoop, window::WindowBuilder};
+use winit::{event_loop::EventLoopBuilder, window::WindowBuilder};
 
 pub fn main() {
-    let event_loop = EventLoop::new().unwrap();
+    let event_loop = EventLoopBuilder::with_user_event().build().unwrap();
     let builder = WindowBuilder::new().with_title("Not Sliding Puzzle");
     let window = builder.build(&event_loop).unwrap();
     env_logger::init();

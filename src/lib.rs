@@ -8,9 +8,9 @@ pub fn program_main() {
     use wasm_bindgen::JsCast;
     use wgpu::web_sys;
     use winit::platform::web::WindowBuilderExtWebSys;
-    use winit::{event_loop::EventLoop, window::WindowBuilder};
+    use winit::{event_loop::EventLoopBuilder, window::WindowBuilder};
 
-    let event_loop = EventLoop::new().unwrap();
+    let event_loop = EventLoopBuilder::with_user_event().build().unwrap();
     let canvas = web_sys::window()
         .unwrap()
         .document()

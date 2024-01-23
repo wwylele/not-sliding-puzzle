@@ -698,7 +698,9 @@ impl<'window> Game<'window> {
                     self.board = Board::new_shuffle(self.current_size, self.current_rule);
                 }
                 ButtonId::Reveal => {
-                    self.board.reveal = !self.board.reveal;
+                    if self.current_rule != Rule::Classic {
+                        self.board.reveal = !self.board.reveal;
+                    }
                 }
                 ButtonId::Picture => {
                     self.initiate_picture_change();

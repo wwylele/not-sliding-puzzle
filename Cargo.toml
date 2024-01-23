@@ -38,3 +38,6 @@ path = "src/lib.rs"
 name = "not-sliding-puzzle"
 path = "src/main.rs"
 test = false
+
+[profile.release]
+opt-level = "s"

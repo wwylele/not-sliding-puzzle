@@ -7,7 +7,7 @@ use web_time::*;
 use wgpu::{util::*, *};
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
-    event::{ElementState, Event, WindowEvent},
+    event::*,
     event_loop::{EventLoop, EventLoopProxy},
     window::Window,
 };
@@ -966,8 +966,17 @@ impl<'window> Game<'window> {
                         WindowEvent::Resized(new_size) => self.resized(new_size),
                         WindowEvent::MouseInput {
                             state: ElementState::Pressed,
+                            button: MouseButton::Left,
                             ..
                         } => self.clicked(),
+                        WindowEvent::Touch(Touch {
+                            location,
+                            phase: TouchPhase::Started,
+                            ..
+                        }) => {
+                            self.cursor_moved(location);
+                            self.clicked();
+                        }
                         WindowEvent::CursorLeft { .. } => {
                             self.cursor_moved(PhysicalPosition::new(-1.0, -1.0))
                         }

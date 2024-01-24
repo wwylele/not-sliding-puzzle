@@ -546,7 +546,7 @@ impl<'window> Game<'window> {
         self.resume_animation();
 
         // Reposition board
-        let boarder_width = 40.0;
+        let button_bar_height_ratio = 0.09; // in relation to board width
         self.window_width = new_size.width.max(1);
         self.window_height = new_size.height.max(1);
         self.config.width = self.window_width;
@@ -557,42 +557,47 @@ impl<'window> Game<'window> {
         let window_width = self.window_width as f32;
         let window_height = self.window_height as f32;
 
-        let outer_aspect =
-            (window_width - boarder_width * 2.0) / (window_height - boarder_width * 2.0);
-        let inner_aspect = self.board.width() as f32 / self.board.height() as f32;
+        let outer_aspect = window_width / window_height;
+        let inner_height =
+            self.board.height() as f32 + self.board.width() as f32 * button_bar_height_ratio;
+        let inner_aspect = self.board.width() as f32 / inner_height;
         let board_pixel_width;
         let board_pixel_height;
         if outer_aspect > inner_aspect {
-            board_pixel_height = window_height - boarder_width * 2.0;
+            board_pixel_height = window_height * self.board.height() as f32 / inner_height;
             board_pixel_width =
                 self.board.width() as f32 / self.board.height() as f32 * board_pixel_height;
         } else {
-            board_pixel_width = window_width - boarder_width * 2.0;
+            board_pixel_width = window_width;
             board_pixel_height =
                 self.board.height() as f32 / self.board.width() as f32 * board_pixel_width;
         }
-        self.board_transform = Mat4::from_scale(vec3(
-            board_pixel_width / window_width,
-            board_pixel_height / window_height,
-            1.0,
-        ));
+        let button_bar_height = board_pixel_width * button_bar_height_ratio;
+
+        self.board_transform =
+            Mat4::from_translation(vec3(0.0, button_bar_height / window_height, 0.0))
+                * Mat4::from_scale(vec3(
+                    board_pixel_width / window_width,
+                    board_pixel_height / window_height,
+                    1.0,
+                ));
         self.board_transform_inv = self.board_transform.inverse();
 
         // Reposition buttons
-        let button_top = (window_height - board_pixel_height) * 0.5;
-        let button_bottom = button_top - boarder_width;
+        let button_bottom = (window_height - (board_pixel_height + button_bar_height)) * 0.5;
+        let button_top = button_bottom + button_bar_height;
         let mut button_left = (window_width - board_pixel_width) * 0.5;
         let mut prev_group = None;
         for button in &mut self.buttons {
             if let Some(prev_group) = prev_group {
                 if prev_group == button.group {
-                    button_left += boarder_width * 1.5;
+                    button_left += button_bar_height * 1.5;
                 } else {
-                    button_left += boarder_width * 1.6;
+                    button_left += button_bar_height * 1.6;
                 }
             }
 
-            let button_right = button_left + boarder_width * 1.5;
+            let button_right = button_left + button_bar_height * 1.5;
 
             let button_x = (button_left + button_right) * 0.5 / window_width * 2.0 - 1.0;
             let button_y = (button_top + button_bottom) * 0.5 / window_height * 2.0 - 1.0;

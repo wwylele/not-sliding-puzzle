@@ -145,6 +145,7 @@ impl Wake for PicturePickerWaker {
 }
 
 struct Game<'window> {
+    texture_dimension_limit: u32,
     window: &'window Window,
     device: Device,
     surface: Surface<'window>,
@@ -241,6 +242,16 @@ fn get_picture_transform(aspect_ratio: f32) -> Mat4 {
     }
 }
 
+fn limit_surface_dimension(config: &mut SurfaceConfiguration, limit: u32) {
+    let large_side = config.width.max(config.height);
+    if large_side < limit {
+        return;
+    }
+    let overshoot = large_side as f32 / limit as f32;
+    config.width = ((config.width as f32 / overshoot) as u32).max(1);
+    config.height = ((config.width as f32 / overshoot) as u32).max(1);
+}
+
 impl<'window> Game<'window> {
     pub async fn new(
         window: &'window Window,
@@ -264,14 +275,15 @@ impl<'window> Game<'window> {
             .expect("Failed to find an appropriate adapter");
 
         // Create the logical device and command queue
+        let limit = Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits());
+        let texture_dimension_limit = limit.max_texture_dimension_2d;
         let (device, queue) = adapter
             .request_device(
                 &DeviceDescriptor {
                     label: None,
                     required_features: Features::empty(),
                     // Make sure we use the texture resolution limits from the adapter, so we can support images the size of the swapchain.
-                    required_limits: Limits::downlevel_webgl2_defaults()
-                        .using_resolution(adapter.limits()),
+                    required_limits: limit,
                 },
                 None,
             )
@@ -448,6 +460,7 @@ impl<'window> Game<'window> {
             .get_default_config(&adapter, size.width, size.height)
             .unwrap();
         config.present_mode = PresentMode::Fifo;
+        limit_surface_dimension(&mut config, texture_dimension_limit);
         surface.configure(&device, &config);
 
         let vertex_buffer_content: &[f32] = &[-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0];
@@ -476,6 +489,7 @@ impl<'window> Game<'window> {
         let picture_picker_waker = Arc::new(PicturePickerWaker { event_proxy });
 
         let mut game = Game {
+            texture_dimension_limit,
             window,
             device,
             queue,
@@ -537,6 +551,7 @@ impl<'window> Game<'window> {
         self.window_height = new_size.height.max(1);
         self.config.width = self.window_width;
         self.config.height = self.window_height;
+        limit_surface_dimension(&mut self.config, self.texture_dimension_limit);
         self.surface.configure(&self.device, &self.config);
 
         let window_width = self.window_width as f32;

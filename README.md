@@ -1,5 +1,9 @@
 # Not Sliding Puzzle
 
+![demo](demo.gif)
+
+A sliding puzzle game with some flavor of chess.
+
 ## Build and run native version
 ```
 cargo run

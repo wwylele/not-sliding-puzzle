@@ -912,11 +912,16 @@ impl<'window> Game<'window> {
             let Some(piece) = &self.board.cell(pos) else {
                 continue;
             };
-            let mut current_pos = pos.as_vec2();
-            if let Some(moving) = &piece.moving {
-                current_pos =
-                    Vec2::lerp(moving.previous_pos.as_vec2(), current_pos, moving.progress);
-            }
+
+            let current_pos = if let Some(moving) = &piece.moving {
+                Vec2::lerp(
+                    moving.positions[0].as_vec2(),
+                    moving.positions[1].as_vec2(),
+                    moving.progress,
+                )
+            } else {
+                pos.as_vec2()
+            };
 
             let translate = current_pos * 2.0
                 - vec2(

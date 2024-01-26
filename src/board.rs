@@ -1,5 +1,6 @@
 use glam::*;
 use rand::*;
+use std::collections::VecDeque;
 use std::time::*;
 
 const PIECE_MOVING_SPEED: f32 = 4.0;
@@ -7,8 +8,11 @@ const PIECE_SHAKING_SPEED: f32 = 4.0;
 const PIECE_MORPHING_SPEED: f32 = 8.0;
 
 pub struct Moving {
-    pub previous_pos: UVec2,
-    pub progress: f32,
+    // nodes on the moving path, from start to end (inclusive)
+    // Always has at least two elements
+    pub positions: VecDeque<UVec2>,
+
+    pub progress: f32, // progress of the current edge
 }
 
 #[derive(Copy, Clone)]
@@ -151,16 +155,10 @@ impl Board {
         if no_animation {
             piece.moving = None;
         } else if let Some(moving) = &mut piece.moving {
-            // If we are already moving,
-            // assuming the existing movement is the inverse movment of the new one.
-            // So we can just flip the progress.
-            // TODO: the assumption above isn't correct
-            // if the player chains multiple on one piece quickly.
-            moving.previous_pos = pos;
-            moving.progress = 1.0 - moving.progress;
+            moving.positions.push_back(self.empty);
         } else {
             piece.moving = Some(Moving {
-                previous_pos: pos,
+                positions: VecDeque::from_iter([pos, self.empty]),
                 progress: 0.0,
             });
         }
@@ -283,11 +281,19 @@ impl Board {
 
             if let Some(moving) = &mut piece.moving {
                 something_moving = true;
-                let new_progress = moving.progress + delta * PIECE_MOVING_SPEED;
-                if new_progress >= 1.0 {
-                    piece.moving = None;
-                } else {
-                    moving.progress = new_progress;
+                moving.progress = moving.progress + delta * PIECE_MOVING_SPEED;
+
+                // Move to the next edge if we have finished the current one
+                while moving.progress >= 1.0 {
+                    if moving.positions.len() == 2 {
+                        // Stop moving if we finished the last edge
+                        piece.moving = None;
+                        break;
+                    } else {
+                        // Pop a node alone with an edge and start the next one
+                        moving.positions.pop_front();
+                        moving.progress -= 1.0;
+                    }
                 }
             }
         }

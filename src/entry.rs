@@ -1,5 +1,6 @@
 use bytemuck::*;
 use glam::*;
+use image::RgbaImage;
 use log::*;
 use rfd::*;
 use std::{borrow::Cow, future::*, io::Cursor, mem::size_of, pin::*, sync::*, task::*};
@@ -19,19 +20,36 @@ pub enum UserEvent {
     PicturePickerWake,
 }
 
-fn load_texture(
+fn load_image(bytes: &[u8], limit: u32) -> Result<RgbaImage, &'static str> {
+    let img = image::io::Reader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|_| "Could not read the file.")?
+        .decode()
+        .map_err(|_| "Failed to decode image data.")?
+        .to_rgba8();
+
+    if img.width() > limit || img.height() > limit {
+        return Err("The picture is too large.");
+    }
+    Ok(img)
+}
+
+fn builtin_texture(
     bytes: &[u8],
     device: &Device,
     queue: &Queue,
     srgb: bool,
-) -> Option<(Texture, f32 /*w/h*/)> {
-    let img = image::io::Reader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?
-        .decode()
-        .ok()?
-        .to_rgba8();
+) -> (Texture, f32 /*w/h*/) {
+    let img = load_image(bytes, 4096).unwrap();
+    load_texture(img, device, queue, srgb)
+}
 
+fn load_texture(
+    img: RgbaImage,
+    device: &Device,
+    queue: &Queue,
+    srgb: bool,
+) -> (Texture, f32 /*w/h*/) {
     let texture_size = Extent3d {
         width: img.width(),
         height: img.height(),
@@ -64,7 +82,7 @@ fn load_texture(
         },
         texture_size,
     );
-    Some((texture, img.width() as f32 / img.height() as f32))
+    (texture, img.width() as f32 / img.height() as f32)
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -186,7 +204,7 @@ struct Game<'window> {
     prev_time: Instant,
     animating: bool,
 
-    picture_picker_task: Option<Pin<Box<dyn Future<Output = Option<Vec<u8>>>>>>,
+    picture_picker_task: Option<Pin<Box<dyn Future<Output = Option<RgbaImage>> + 'window>>>,
     picture_picker_waker: Arc<PicturePickerWaker>,
 }
 
@@ -401,24 +419,23 @@ impl<'window> Game<'window> {
         });
 
         // Load textures and samplers
-        let (texture, aspect_ratio) =
-            load_texture(res::EXAMPLE_PICTURE, &device, &queue, true).unwrap();
+        let (texture, aspect_ratio) = builtin_texture(res::EXAMPLE_PICTURE, &device, &queue, true);
         let texture_view = texture.create_view(&TextureViewDescriptor::default());
         let picture_transform = get_picture_transform(aspect_ratio);
 
-        let (mask_texture, _) = load_texture(res::PIECE_MASK_PNG, &device, &queue, false).unwrap();
+        let (mask_texture, _) = builtin_texture(res::PIECE_MASK_PNG, &device, &queue, false);
         let mask_texture_view = mask_texture.create_view(&TextureViewDescriptor::default());
 
-        let (light_texture, _) = load_texture(res::BLOCK_PNG, &device, &queue, true).unwrap();
+        let (light_texture, _) = builtin_texture(res::BLOCK_PNG, &device, &queue, true);
         let light_texture_view = light_texture.create_view(&TextureViewDescriptor::default());
 
-        let (button_texture, _) = load_texture(res::BUTTON_PNG, &device, &queue, true).unwrap();
+        let (button_texture, _) = builtin_texture(res::BUTTON_PNG, &device, &queue, true);
         let button_texture_view = button_texture.create_view(&TextureViewDescriptor::default());
 
-        let (button_mask, _) = load_texture(res::WHITE_PNG, &device, &queue, true).unwrap();
+        let (button_mask, _) = builtin_texture(res::WHITE_PNG, &device, &queue, true);
         let button_mask_view = button_mask.create_view(&TextureViewDescriptor::default());
 
-        let (button_deco, _) = load_texture(res::BUTTON_DECO_PNG, &device, &queue, true).unwrap();
+        let (button_deco, _) = builtin_texture(res::BUTTON_DECO_PNG, &device, &queue, true);
         let button_deco_view = button_deco.create_view(&TextureViewDescriptor::default());
 
         let sampler = device.create_sampler(&SamplerDescriptor {
@@ -632,16 +649,31 @@ impl<'window> Game<'window> {
             warn!("Already picking file");
             return;
         }
-        let task = async {
+        let limit = self.texture_dimension_limit;
+        let window = self.window;
+        let task = async move {
             let Some(file) = AsyncFileDialog::new()
                 .add_filter("Image", &["bmp", "png", "jpg", "jpeg", "gif"])
                 .set_title("Pick a custom picture")
+                .set_parent(window)
                 .pick_file()
                 .await
             else {
                 return None;
             };
-            Some(file.read().await)
+            match load_image(&file.read().await, limit) {
+                Ok(img) => Some(img),
+                Err(error) => {
+                    AsyncMessageDialog::new()
+                        .set_level(MessageLevel::Error)
+                        .set_title("Error")
+                        .set_description(error)
+                        .set_parent(window)
+                        .show()
+                        .await;
+                    None
+                }
+            }
         };
         self.picture_picker_task = Some(Box::pin(task) as Pin<Box<_>>);
         self.poll_picture_change();
@@ -665,12 +697,9 @@ impl<'window> Game<'window> {
 
                 info!("Received image data");
 
-                let Some((texture, aspect_ratio)) =
-                    load_texture(&image_data, &self.device, &self.queue, true)
-                else {
-                    warn!("Unable to decode image");
-                    return;
-                };
+                let (texture, aspect_ratio) =
+                    load_texture(image_data, &self.device, &self.queue, true);
+
                 let texture_view = texture.create_view(&TextureViewDescriptor::default());
 
                 self.picture_transform = get_picture_transform(aspect_ratio);

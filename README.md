@@ -1,6 +1,9 @@
 # Not Sliding Puzzle
 
+Play in bowser: https://wwylele.github.io/not-sliding-puzzle/index.html
+
 ![demo](demo.gif)
+
 
 A sliding puzzle game with some flavor of chess.
 

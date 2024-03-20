@@ -1,6 +1,6 @@
 # Not Sliding Puzzle
 
-Play in bowser: https://wwylele.github.io/not-sliding-puzzle/index.html
+Play in browser: https://wwylele.github.io/not-sliding-puzzle/index.html
 
 ![demo](demo.gif)
 
